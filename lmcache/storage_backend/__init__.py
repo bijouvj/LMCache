@@ -6,6 +6,7 @@ from lmcache.storage_backend.hybrid_backend import \
 from lmcache.storage_backend.local_backend import (LMCLocalBackend,
                                                    LMCLocalDiskBackend)
 from lmcache.storage_backend.remote_backend import LMCRemoteBackend
+from lmcache.storage_backend.kvikio_backend import KvikIOBackend
 
 logger = init_logger(__name__)
 
@@ -39,6 +40,12 @@ def CreateStorageBackend(
                 remote_url=str(q)) if p is not None and q is not None:
             logger.info("Initializing hybrid backend")
             return LMCHybridBackend(config, metadata)
+
+		case LMCacheEngineConfig(_, local_device=None, remote_url=None,
+                                 kvikio_cache_dir=str(p)) if p is not None:
+            # kvikio only
+            logger.info("Initializing kvikio-only backend")
+            return KvikIOBackend(config, metadata, dst_device)
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")

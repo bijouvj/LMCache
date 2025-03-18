@@ -31,6 +31,8 @@ class LMCacheEngineConfig:
     save_decode_cache: bool  # whether to store decode kv cache
 
     enable_blending: bool  # whether to enable blending
+    kvikio_cache_dir: Optional[str]
+    kvikio_buffer_size: Optional[int]
 
     @staticmethod
     def from_defaults(
@@ -95,6 +97,8 @@ class LMCacheEngineConfig:
         pipelined_backend = config.get("pipelined_backend", False)
         save_decode_cache = config.get("save_decode_cache", False)
         enable_blending = config.get("enable_blending", False)
+        kvikio_cache_dir = config.get("kvikio_cache_dir", None)
+        kvikio_buffer_size = config.get("kvikio_buffer_size", 1024*1024*1024)
 
         match local_device:
             case "cpu" | "cuda" | None:
@@ -122,6 +126,8 @@ class LMCacheEngineConfig:
             pipelined_backend,
             save_decode_cache,
             enable_blending,
+            kvikio_cache_dir,
+            kvikio_buffer_size,
         )
 
 
