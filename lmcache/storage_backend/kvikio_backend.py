@@ -13,6 +13,7 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
+
 class KvikIOBackend(LMCBackendInterface):
     """
     LMCache backend that uses NVIDIA GDS cuFile via the kvikio library for
@@ -21,13 +22,13 @@ class KvikIOBackend(LMCBackendInterface):
 
     def __init__(
         self,
-        config: 'LMCacheEngineConfig',
-        metadata: 'LMCacheEngineMetadata',
+        config: "LMCacheEngineConfig",
+        metadata: "LMCacheEngineMetadata",
         dst_device: str = "cuda",
     ):
         """
         Initialize the KvikIO backend.
-        
+
         Args:
             cache_dir: Directory to store cache files
             device: The device where the tensors are located
@@ -80,30 +81,29 @@ class KvikIOBackend(LMCBackendInterface):
             print("Oh NO!!!")
             logger.warning("GDS is not available. Falling back to standard I/O path.")
 
-
     def _get_cache_path(self, key: CacheEngineKey) -> Path:
         """Get the path to the cache file for a given key."""
         return self.cache_dir / f"{key.chunk_hash}.pt"
-    
+
     def contains(self, key: CacheEngineKey) -> bool:
         """
         Check if a key exists in the cache.
-        
+
         Args:
             key: The cache key to check
-            
+
         Returns:
             bool: True if the key exists, False otherwise
         """
         return self.exists(key)
-    
+
     def get(self, key: CacheEngineKey) -> Optional[torch.Tensor]:
         """
         Get a tensor from the cache.
-        
+
         Args:
             key: The cache key to retrieve
-            
+
         Returns:
             Optional[torch.Tensor]: The tensor if found, None otherwise
         """
@@ -113,7 +113,9 @@ class KvikIOBackend(LMCBackendInterface):
             cache_path = self._get_cache_path(key)
 
             if not cache_path.exists():
-                logger.warning(f"Cache file for key {key} does not exist at {cache_path}")
+                logger.warning(
+                    f"Cache file for key {key} does not exist at {cache_path}"
+                )
                 return None
 
             # Create an empty tensor with the specified shape and dtype
@@ -125,8 +127,10 @@ class KvikIOBackend(LMCBackendInterface):
 
             expected_bytes = tensor.numel() * tensor.element_size()
             if bytes_read != expected_bytes:
-                logger.error(f"Failed to read complete tensor for key {key}. "
-                             f"Read {bytes_read} bytes, expected {expected_bytes}.")
+                logger.error(
+                    f"Failed to read complete tensor for key {key}. "
+                    f"Read {bytes_read} bytes, expected {expected_bytes}."
+                )
                 return None
 
             # all tensors are float32 in the cache
@@ -136,13 +140,15 @@ class KvikIOBackend(LMCBackendInterface):
             logger.error(f"Error in offboarding tensor with key {key}: {str(e)}")
             return None
 
-    def batched_get(self, keys: Iterable[CacheEngineKey]) -> Iterable[Optional[torch.Tensor]]:
+    def batched_get(
+        self, keys: Iterable[CacheEngineKey]
+    ) -> Iterable[Optional[torch.Tensor]]:
         """
         Get multiple tensors from the cache.
-        
+
         Args:
             keys: The cache keys to retrieve
-            
+
         Returns:
             Iterable[Optional[torch.Tensor]]: The tensors if found, None for missing keys
         """
@@ -150,11 +156,13 @@ class KvikIOBackend(LMCBackendInterface):
         for key in keys:
             results.append(self.get(key))
         return results
-    
-    def put(self, key: CacheEngineKey, kv_chunk: torch.Tensor, blocking: bool = False) -> None:
+
+    def put(
+        self, key: CacheEngineKey, kv_chunk: torch.Tensor, blocking: bool = False
+    ) -> None:
         """
         Put a tensor into the cache.
-        
+
         Args:
             key: The cache key to store
             kv_chunk: The tensor to store
@@ -168,11 +176,11 @@ class KvikIOBackend(LMCBackendInterface):
         else:
             # Use put_nonblocking for non-blocking operations
             self.put_nonblocking(key, kv_chunk)
-    
+
     def put_nonblocking(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
         """
         Put a tensor into the cache without blocking.
-        
+
         Args:
             key: The cache key to store
             kv_chunk: The tensor to store
@@ -200,53 +208,58 @@ class KvikIOBackend(LMCBackendInterface):
             success = bytes_written == expected_bytes
 
             if not success:
-                logger.error(f"Failed to write complete tensor for key {key}. "
-                             f"Wrote {bytes_written} bytes, expected {expected_bytes}.")
+                logger.error(
+                    f"Failed to write complete tensor for key {key}. "
+                    f"Wrote {bytes_written} bytes, expected {expected_bytes}."
+                )
 
         except Exception as e:
-            logger.error(f"Error in onboarding tensor with key {str(cache_path)}: {str(e)}")
-    
-    
+            logger.error(
+                f"Error in onboarding tensor with key {str(cache_path)}: {str(e)}"
+            )
+
     def delete(self, key: CacheEngineKey) -> bool:
         """
         Delete a tensor from disk.
-        
+
         Args:
             key: Unique identifier for the tensor
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
         try:
             cache_path = self._get_cache_path(key)
-            
+
             if cache_path.exists():
                 os.remove(cache_path)
                 return True
             else:
-                logger.warning(f"Cache file for key {key} does not exist at {cache_path}")
+                logger.warning(
+                    f"Cache file for key {key} does not exist at {cache_path}"
+                )
                 return False
         except Exception as e:
             logger.error(f"Error in deleting tensor with key {key}: {str(e)}")
             return False
-    
+
     def exists(self, key: CacheEngineKey) -> bool:
         """
         Check if a tensor exists on disk.
-        
+
         Args:
             key: Unique identifier for the tensor
-            
+
         Returns:
             bool: True if the tensor exists, False otherwise
         """
         cache_path = self._get_cache_path(key)
         return cache_path.exists()
-    
+
     def get_info(self) -> Dict[str, Any]:
         """
         Get information about the backend.
-        
+
         Returns:
             Dict[str, Any]: Information about the backend
         """
@@ -258,7 +271,7 @@ class KvikIOBackend(LMCBackendInterface):
             "gds_available": self.gds_available,
             "kvikio_version": kvikio.__version__,
         }
-    
+
     def close(self) -> None:
         """
         Close the backend and release any resources.
@@ -270,7 +283,9 @@ class KvikIOBackend(LMCBackendInterface):
         # delete all cache files
         # Ensure the cache directory exists
         if not os.path.exists(self.cache_dir):
-            logger.warning(f"Cache directory {self.cache_dir} does not exist. Skipping cleanup.")
+            logger.warning(
+                f"Cache directory {self.cache_dir} does not exist. Skipping cleanup."
+            )
             return
         # Find and delete all .pt files in the cache directory
         for file_path in glob.glob(os.path.join(self.cache_dir, "*.pt")):
