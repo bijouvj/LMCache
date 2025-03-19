@@ -51,9 +51,9 @@ class KvikIOBackend(LMCBackendInterface):
         self.kv_shape = (32, 2, 256, 8, 128)
         self.kv_dtype = torch.bfloat16
 
-        # Create a lock-protected hash map for tensor shapes
-        self.shape_lock = threading.Lock()
-        self.shape_map: Dict[str, Tuple[int, ...]] = {}  # Maps chunk_hash to tensor shape
+        # Create a lock-protected hash map for IO futures
+        self.io_lock = threading.Lock()
+        self.io_map: Dict[str, int] = {}  # Maps chunk_hash to IO future
 
         # Create cache directory if it doesn't exist
         if not self.cache_dir.exists():
@@ -113,38 +113,26 @@ class KvikIOBackend(LMCBackendInterface):
             Optional[torch.Tensor]: The tensor if found, None otherwise
         """
         # First check if we have the shape in our map
-        with self.shape_lock:
-            tensor_shape = self.shape_map.get(key.chunk_hash)
+        with self.io_lock:
+            bytes_written = self.io_map.get(key.chunk_hash)
 
-        if tensor_shape is None:
-            logger.debug(f"No shape found for key {key.chunk_hash} in shape map, using default")
+        if bytes_written is None:
             return None
 
-        # Check if the file exists
+        # file should exist by now
         cache_path = self._get_cache_path(key)
 
-        try:
-            # Create an empty tensor with the specified shape and dtype
-            tensor = torch.empty(tensor_shape, dtype=torch.float32, device=self.device)
+        # Create an empty tensor with the specified shape and dtype
+        tensor = torch.empty(self.kv_shape, dtype=torch.float32, device=self.device)
 
-            # Use kvikio to read the tensor from disk
-            with kvikio.CuFile(str(cache_path), "r") as f:
-                bytes_read = f.read(tensor)
+        # Use kvikio to read the tensor from disk
+        with kvikio.CuFile(str(cache_path), "r") as f:
+            future = f.pread(tensor)
+            bytes_read = future.get()
 
-            expected_bytes = tensor.numel() * tensor.element_size()
-            if bytes_read != expected_bytes:
-                logger.error(
-                    f"Failed to read complete tensor for key {key}. "
-                    f"Read {bytes_read} bytes, expected {expected_bytes}."
-                )
-                return None
-
-            # all tensors are float32 in the cache
-            tensor = tensor.to(self.kv_dtype)
-            return tensor
-        except Exception as e:
-            logger.error(f"Error in offboarding tensor with key {key}: {str(e)}")
-            return None
+        # all tensors are float32 in the cache
+        tensor = tensor.to(self.kv_dtype)
+        return tensor
 
     def batched_get(
         self, keys: Iterable[CacheEngineKey]
@@ -177,10 +165,6 @@ class KvikIOBackend(LMCBackendInterface):
         try:
             cache_path = self._get_cache_path(key)
 
-            # Store the tensor shape in our shape map
-            with self.shape_lock:
-                self.shape_map[key.chunk_hash] = tuple(kv_chunk .shape)
-
             if kv_chunk.dtype != torch.float32:
                 kv_chunk = kv_chunk.to(torch.float32)
 
@@ -191,23 +175,17 @@ class KvikIOBackend(LMCBackendInterface):
             # Use kvikio to write the tensor to disk
             with kvikio.CuFile(str(cache_path), "w") as f:
                 kv_chunk = kv_chunk.contiguous()
-                bytes_written = f.write(kv_chunk)
-
-            expected_bytes = kv_chunk.numel() * kv_chunk.element_size()
-            success = bytes_written == expected_bytes
-
-            if not success:
-                logger.error(
-                    f"Failed to write complete tensor for key {key}. "
-                    f"Wrote {bytes_written} bytes, expected {expected_bytes}."
-                )
+                future = f.pwrite(kv_chunk)
+                bytes_written = future.get()
+                with self.io_lock:
+                    self.io_map[key.chunk_hash] = bytes_written
 
         except Exception as e:
             logger.error(
                 f"Error in onboarding tensor with key {str(cache_path)}: {str(e)}"
             )
 
-    def put_nonblocking(self, key: CacheEngineKey, tensor: torch.Tensor) -> None:
+    def put_nonblocking(self, key: CacheEngineKey, kv_chunk: torch.Tensor) -> None:
         """
         Put a tensor into the cache without blocking.
 
@@ -232,8 +210,8 @@ class KvikIOBackend(LMCBackendInterface):
             bool: True if successful, False otherwise
         """
         try:
-            with self.shape_lock:
-                del self.shape_map[key.chunk_hash]
+            with self.io_lock:
+                del self.io_map[key.chunk_hash]
 
             cache_path = self._get_cache_path(key)
 
@@ -300,5 +278,5 @@ class KvikIOBackend(LMCBackendInterface):
                 logger.error(f"Failed to delete {file_path}: {str(e)}")
 
         # Clear shape map
-        with self.shape_lock:
-            self.shape_map.clear()
+        with self.io_lock:
+            self.io_map.clear()
