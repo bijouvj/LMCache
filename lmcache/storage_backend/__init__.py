@@ -50,7 +50,7 @@ def CreateStorageBackend(
         ) if (p is not None):
             # kvikio only
             logger.info("Initializing kvikio-only backend")
-            return KvikIOBackend(config, metadata, dst_device)
+            return KvikIOBackend(config, metadata)
 
         case _:
             raise ValueError(f"Invalid configuration: {config}")
