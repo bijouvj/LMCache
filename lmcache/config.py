@@ -54,6 +54,8 @@ class LMCacheEngineConfig:
     blend_separator: str  # the separator for blending
     blend_add_special_in_precomp: bool
     # whether to add special tokens in pre-computations
+    kvikio_cache_dir: Optional[str]
+    kvikio_buffer_size: Optional[int]
 
     @staticmethod
     def from_defaults(
@@ -138,6 +140,8 @@ class LMCacheEngineConfig:
                                      blend_default_separator)
         blend_add_special_in_precomp = config.get(
             "blend_add_special_in_precomp", False)
+        kvikio_cache_dir = config.get("kvikio_cache_dir", None)
+        kvikio_buffer_size = config.get("kvikio_buffer_size", 1024*1024*1024)
 
         match local_device:
             case "cpu" | "cuda" | None:
@@ -170,6 +174,8 @@ class LMCacheEngineConfig:
             blend_min_tokens,
             blend_separator,
             blend_add_special_in_precomp,
+            kvikio_cache_dir,
+            kvikio_buffer_size,
         )
 
     @staticmethod
