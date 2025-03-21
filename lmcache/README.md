@@ -27,3 +27,7 @@ Inside the container, create the mount point, and mount the NVMe drive:
 mkdir /mnt/nvme
 mount -o data=ordered /dev/nvme0n1 /mnt/nvme
 ```
+
+Install the kvikio package in the container:
+
+https://docs.rapids.ai/api/kvikio/nightly/install/
