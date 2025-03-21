@@ -1,6 +1,7 @@
 import hashlib
+import threading
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from nvtx import annotate  # type: ignore
@@ -12,10 +13,26 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 @dataclass
 class DiskCacheMetadata:
     path: str
-    size: float
+    size: int  # in bytes
+    shape: Optional[torch.Size] = None
+    dtype: Optional[torch.dtype] = None
 
 
-@dataclass
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.half: "half",
+    torch.float16: "half",
+    torch.bfloat16: "bfloat16",
+    torch.float: "float",
+    torch.float32: "float",
+    torch.float64: "double",
+    torch.double: "double",
+    torch.uint8: "fp8",
+    torch.float8_e4m3fn: "fp8_e4m3",
+    torch.float8_e5m2: "fp8_e5m2",
+}
+
+
+@dataclass(order=True)
 class CacheEngineKey:
     fmt: str
     model_name: str
@@ -64,3 +81,14 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
         color=_get_color_for_nvtx(func.__qualname__),
         domain=domain,
     )(func)
+
+
+##### Threading related #####
+def thread_safe(func):
+    lock = threading.Lock()
+
+    def wrapper(*args, **kwargs):
+        with lock:
+            return func(*args, **kwargs)
+
+    return wrapper

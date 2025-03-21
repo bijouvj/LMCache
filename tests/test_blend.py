@@ -1,3 +1,6 @@
+import random
+from typing import List, Tuple
+
 import pytest
 import torch
 
@@ -7,9 +10,9 @@ from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype)
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, dtype, kv_shape)
 
 
 def dumb_cfg():
@@ -20,6 +23,7 @@ def dumb_cfg():
 
 
 def generate_kv_cache(num_tokens, fmt, device, fill=None):
+    assert num_tokens >= 0
     ret = []
     num_heads = 8
     head_size = 128
@@ -38,23 +42,38 @@ def generate_kv_cache(num_tokens, fmt, device, fill=None):
     return tuple(ret)
 
 
-def generate_tokens(num_tokens, device):
-    return torch.randint(0, 10000, size=[num_tokens]).to(device)
+def fake_encode(text: str):
+    return [int(token) for token in text.split()]
 
 
-def generate_spt(length):
-    return torch.full((length, ), 10010)
+def fake_decode(token_ids: List[int]):
+    return " ".join([str(token) for token in token_ids])
 
 
-def generate_tokens_with_spt(num_tokens, device, spt):
-    """
-    Generate the tokens ended with spt
-    """
-    minval = torch.min(spt).item()
-    ret = torch.randint(minval - 100, minval - 10,
-                        size=[num_tokens]).to(device)
-    ret[-len(spt):] = spt
-    return ret
+def generate_text(num_tokens) -> str:
+    return fake_decode(random.choices(range(10000), k=num_tokens))
+
+
+def get_spt():
+    return "[BLEND_SEP]"
+
+
+def drop_encode_and_indices(prompt: str,
+                            spt: str) -> Tuple[List[int], List[int]]:
+    text_chunk_list = prompt.split(spt)
+    input_ids = []
+    input_text = ""
+    blend_indices = []
+    current_idx = 0
+    for text_chunk in text_chunk_list:
+        encoded = fake_encode(text_chunk)
+        input_ids.extend(encoded)
+        input_text += text_chunk
+        current_idx += len(encoded)
+        blend_indices.append(current_idx)
+    if len(blend_indices) > 0:
+        blend_indices.pop()
+    return input_ids, blend_indices
 
 
 def concatenate_kv_caches(kv_chunks, fmt):
@@ -105,9 +124,45 @@ def check_kv_layer_equal(kv_tuple, layer_id, k, v, start_token, end_token,
     check_kv_cache_equal(v_layer, v, start_token, end_token, fmt)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("spt_length", [1, 2])
-def test_spt_full_hit(fmt, spt_length, autorelease):
+def check_has_spt(tokens, spt):
+    """
+    Check if the tokens have the spt
+    """
+    assert len(spt) > 0
+    if len(tokens) < len(spt):
+        return False
+    else:
+        i = 0
+        while True:
+            endi = i + len(spt)
+            if endi > len(tokens):
+                break
+            if tokens[i:endi] == spt:
+                return True
+            i += 1
+        return False
+
+
+def assert_indices_is_concat(indices, chunk_lengths):
+    """
+    Check if the indices is the concatenation of the chunk lengths
+    """
+    assert len(indices) == len(chunk_lengths) - 1
+    if len(indices) == 0:
+        return
+    this_seg_start = 0
+    for i, idx in enumerate(indices):
+        assert idx >= this_seg_start
+        seg_len = idx - this_seg_start
+        assert seg_len == chunk_lengths[i]
+        this_seg_start = idx
+    assert len(chunk_lengths) >= 2
+    assert indices[-1] == this_seg_start
+    assert indices[-1] == sum(chunk_lengths[:-1])
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_spt_full_hit(fmt, autorelease):
     """
     This test tests the following use cases:
     - All chunks are fully hit
@@ -117,34 +172,36 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     """
 
     # generate special tokens
-    spt = generate_spt(spt_length)
+    spt = get_spt()
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     kvs = [
         generate_kv_cache(length, fmt, "cuda", fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
-    tokens = [
-        generate_tokens_with_spt(length, spt.device, spt)
-        for length in chunk_lengths
+    tokens = [generate_text(length) for length in chunk_lengths]
+
+    token_ids = [fake_encode(token) for token in tokens]
+    token_ids_tensors = [
+        torch.tensor(token_id, device="cpu") for token_id in token_ids
     ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for token, kv in zip(tokens, kvs):
-        engine.store(token, kv)
+    for token_ids_tensor, kv in zip(token_ids_tensors, kvs):
+        engine.store(token_ids_tensor, kv)
 
-    retriever = SPTBlendRetriever(spt, engine, metadata)
+    retriever = SPTBlendRetriever(engine, metadata)
 
     def check_groups(*ids):
-        input1 = torch.cat([tokens[i] for i in ids])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
+        query_prompt = spt.join([tokens[i] for i in ids])
+        input_ids, blend_indices = drop_encode_and_indices(query_prompt, spt)
+        new_prompt = torch.tensor(input_ids, device="cpu")
+        ret = retriever.new_request([new_prompt], [blend_indices])
         target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(
-            input1,
-            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             check_kv_layer_equal(target_kv, layer_id, result.k, result.v, 0,
@@ -161,16 +218,15 @@ def test_spt_full_hit(fmt, spt_length, autorelease):
     check_groups(1, 1, 2, 2)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("spt_length", [1, 2])
-def test_spt_hit_miss(fmt, spt_length, autorelease):
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_spt_hit_miss(fmt, autorelease):
     """
     This test tests the following use cases:
     - Some chunks are completely missing, some chunks are fully hit
     """
 
     # generate special tokens
-    spt = generate_spt(spt_length)
+    spt = get_spt()
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [True, False, True, False]
@@ -178,33 +234,35 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
         generate_kv_cache(length, fmt, "cuda", fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
-    tokens = [
-        generate_tokens_with_spt(length, spt.device, spt)
-        for length in chunk_lengths
+    tokens = [generate_text(length) for length in chunk_lengths]
+    token_ids = [fake_encode(token) for token in tokens]
+    token_ids_tensors = [
+        torch.tensor(token_id, device="cpu") for token_id in token_ids
     ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for flag, token, kv in zip(has_insterted, tokens, kvs):
+    for flag, token_ids_tensor, kv in zip(has_insterted, token_ids_tensors,
+                                          kvs):
         if flag:
-            engine.store(token, kv)
+            engine.store(token_ids_tensor, kv)
 
-    retriever = SPTBlendRetriever(spt, engine, metadata)
+    retriever = SPTBlendRetriever(engine, metadata)
 
     def check_groups(*ids):
-        input1 = torch.cat([tokens[i] for i in ids])
+        query_prompt = spt.join([tokens[i] for i in ids])
+        input_ids, blend_indices = drop_encode_and_indices(query_prompt, spt)
+        new_prompt = torch.tensor(input_ids, device="cpu")
+        ret = retriever.new_request([new_prompt], [blend_indices])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
-        target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(
-            input1,
-            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             start_token = 0
             for i in ids:
                 chunk_len = chunk_lengths[i]
+                assert chunk_len >= 0
                 if has_insterted[i]:
                     check_kv_layer_equal(target_kv, layer_id, result.k,
                                          result.v, start_token,
@@ -226,16 +284,15 @@ def test_spt_hit_miss(fmt, spt_length, autorelease):
     check_groups(1, 2, 3)  # N, Y, N
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("spt_length", [1, 2])
-def test_spt_all_miss(fmt, spt_length, autorelease):
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_spt_all_miss(fmt, autorelease):
     """
     This test tests the following use cases:
     - All the chunks are completely missing
     """
 
     # generate special tokens
-    spt = generate_spt(spt_length)
+    spt = get_spt()
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [False, False, False, False]
@@ -243,27 +300,28 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
         generate_kv_cache(length, fmt, "cuda", fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
-    tokens = [
-        generate_tokens_with_spt(length, spt.device, spt)
-        for length in chunk_lengths
+    tokens = [generate_text(length) for length in chunk_lengths]
+    token_ids = [fake_encode(token) for token in tokens]
+    token_ids_tensors = [
+        torch.tensor(token_id, device="cpu") for token_id in token_ids
     ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for flag, token, kv in zip(has_insterted, tokens, kvs):
+    for flag, token_ids_tensor, kv in zip(has_insterted, token_ids_tensors,
+                                          kvs):
         if flag:
-            engine.store(token, kv)
+            engine.store(token_ids_tensor, kv)
 
-    retriever = SPTBlendRetriever(spt, engine, metadata)
+    retriever = SPTBlendRetriever(engine, metadata)
 
     def check_groups(*ids):
-        input1 = torch.cat([tokens[i] for i in ids])
-        target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(
-            input1,
-            torch.tensor([0, target_len]).to(torch.int))
+        query_prompt = spt.join([tokens[i] for i in ids])
+        input_ids, blend_indices = drop_encode_and_indices(query_prompt, spt)
+        new_prompt = torch.tensor(input_ids, device="cpu")
+        ret = retriever.new_request([new_prompt], [blend_indices])
         for layer_id in range(32):
             result = ret.result(layer_id)
             assert result.k is None
@@ -271,17 +329,19 @@ def test_spt_all_miss(fmt, spt_length, autorelease):
             assert (result.valid_mask == 0).all()
             assert (result.original_positions == 0).all()
 
+    check_groups(0, 1, 2, 3)
+    check_groups(1, 2, 3)
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("spt_length", [1, 2])
-def test_spt_partial_hit(fmt, spt_length, autorelease):
+
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_spt_partial_hit(fmt, autorelease):
     """
     This test tests the following use cases:
     - Partially hit chunks
     """
 
     # generate special tokens
-    spt = generate_spt(spt_length)
+    spt = get_spt()
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     inserted_length = [500, 1000, 800, 1250]
@@ -289,30 +349,32 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
         generate_kv_cache(length, fmt, "cuda", fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
-    tokens = [
-        generate_tokens_with_spt(length, spt.device, spt)
-        for length in chunk_lengths
+    tokens = [generate_text(length) for length in chunk_lengths]
+    token_ids = [fake_encode(token) for token in tokens]
+    token_ids_tensors = [
+        torch.tensor(token_id, device="cpu") for token_id in token_ids
     ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for ilen, token, kv in zip(inserted_length, tokens, kvs):
+    for ilen, token_ids_tensor, kv in zip(inserted_length, token_ids_tensors,
+                                          kvs):
+        assert ilen < len(token_ids_tensor)
         s = slice(0, ilen)
         partial_kv = slice_kv_caches(kv, s, fmt)
-        partial_token = token[s]
-        engine.store(partial_token, partial_kv)
+        partial_token_ids_tensor = token_ids_tensor[s]
+        engine.store(partial_token_ids_tensor, partial_kv)
 
-    retriever = SPTBlendRetriever(spt, engine, metadata)
+    retriever = SPTBlendRetriever(engine, metadata)
 
     def check_groups(*ids):
-        input1 = torch.cat([tokens[i] for i in ids])
+        query_prompt = spt.join([tokens[i] for i in ids])
+        input_ids, blend_indices = drop_encode_and_indices(query_prompt, spt)
+        new_prompt = torch.tensor(input_ids, device="cpu")
+        ret = retriever.new_request([new_prompt], [blend_indices])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
-        target_len = sum([chunk_lengths[i] for i in ids])
-        ret = retriever.new_request(
-            input1,
-            torch.tensor([0, target_len]).to(torch.int))
         for layer_id in range(32):
             result = ret.result(layer_id)
             start_token = 0
@@ -346,50 +408,51 @@ def test_spt_partial_hit(fmt, spt_length, autorelease):
     check_groups(0, 0)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
-@pytest.mark.parametrize("spt_length", [1, 2])
-def test_spt_multi_query(fmt, spt_length, autorelease):
+@pytest.mark.parametrize("fmt", ["vllm"])
+def test_spt_multi_query(fmt, autorelease):
     """
     This test tests the following use cases:
     - Have multiple queries in a batch, need to split at the query boundary 
     even if there is no spt
     """
-    # generate special tokens
-    spt = generate_spt(spt_length)
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     kvs = [
         generate_kv_cache(length, fmt, "cuda", fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
-    tokens = [generate_tokens(length, "cpu") for length in chunk_lengths]
+    tokens = [generate_text(length) for length in chunk_lengths]
+    token_ids = [fake_encode(token) for token in tokens]
+    token_ids_tensors = [
+        torch.tensor(token_id, device="cpu") for token_id in token_ids
+    ]
 
     cfg = dumb_cfg()
     metadata = dumb_metadata(fmt)
     engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
 
-    for token, kv in zip(tokens, kvs):
-        engine.store(token, kv)
+    for token_ids_tensor, kv in zip(token_ids_tensors, kvs):
+        engine.store(token_ids_tensor, kv)
 
-    retriever = SPTBlendRetriever(spt, engine, metadata)
+    retriever = SPTBlendRetriever(engine, metadata)
 
     def check_groups(*ids):
-        input1 = torch.cat([tokens[i] for i in ids])
+        query_prompt_list = [tokens[i] for i in ids]
+        input_ids_list = []
+        blend_indices_list: List[List[int]] = []
+        for query_prompt in query_prompt_list:
+            input_ids = fake_encode(query_prompt)
+            input_ids_list.append(torch.tensor(input_ids, device="cpu"))
+            blend_indices_list.append([])
         target_kv = concatenate_kv_caches([kvs[i] for i in ids], fmt)
-        query_start_locs = [0]
-        for i in ids:
-            last = query_start_locs[-1]
-            query_start_locs.append(last + chunk_lengths[i])
-
-        ret1 = retriever.new_request(
-            input1,
-            torch.tensor(query_start_locs).to(torch.int))
-        ret2 = retriever.new_request(
-            input1,
-            torch.tensor([0, query_start_locs[-1]]).to(torch.int))
-
-        target_len1 = query_start_locs[-1]
-        target_len2 = int(query_start_locs[1] // 256) * 256
+        ret1 = retriever.new_request(input_ids_list, blend_indices_list)
+        single_prompt = " ".join(query_prompt_list)
+        single_prompt_tensor = torch.tensor(fake_encode(single_prompt),
+                                            device="cpu")
+        ret2 = retriever.new_request([single_prompt_tensor], [[]])
+        target_len1 = sum([chunk_lengths[i] for i in ids])
+        # NOTE: Assuming chunk size is 256.
+        target_len2 = int(chunk_lengths[ids[0]] // 256) * 256
 
         for layer_id in range(32):
             result1 = ret1.result(layer_id)

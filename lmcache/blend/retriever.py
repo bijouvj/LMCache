@@ -187,10 +187,12 @@ class SPTBlendRetriever(BlendRetriever):
     of the input text chunk.
 
     Example:
-      Input = [x, x, x, spt, y, y, spt, z, z, z, z]
-      Requests sent to LMCache engine:
-        - [x, x, x, spt]
-        - [y, y, spt]
+        Input = [x, x, x, spt, y, y, spt, z, z, z, z]
+
+        Requests sent to LMCache engine when using drop_spt_and_get_indices
+        and new_request:
+        - [x, x, x]
+        - [y, y]
         - [z, z, z, z]
 
     Therefore, to use this retriever, the text chunks are better to also be 
@@ -199,75 +201,42 @@ class SPTBlendRetriever(BlendRetriever):
 
     def __init__(
         self,
-        spt: torch.Tensor,
         cache_engine: LMCacheEngine,
         metadata: LMCacheEngineMetadata,
     ):
         """Initialize the SPT retriever.
 
-        :param torch.Tensor spt: The special token to use as delimiter
         :param LMCacheEngine cache_engine: The cache engine to retrieve 
             the KV caches
         :param LMCacheEngineMetadata metadata: The metadata of the cache engine
         """
-        self.spt = spt
         self.cache_engine = cache_engine
         self.metadata = metadata
 
-    def _split_input_tokens(self, input_tokens_single_query: torch.Tensor):
-        """Split the input tokens into multiple requests based on the ROI.
-
-        Returns a list of split tokens for cache_engine to retrieve
-        """
-        spt_len = len(self.spt)
-        if spt_len == 1:
-            indices = (
-                input_tokens_single_query == self.spt).nonzero().squeeze()
-        else:
-            windows = input_tokens_single_query.unfold(0, spt_len, 1)
-            indices = (windows == self.spt).all(dim=1).nonzero().squeeze()
-
-        if indices.dim() == 0:
-            indices = indices.unsqueeze(0)
-
-        start = 0
-        splitted_tokens = []
-
-        for i in indices:
-            splitted_tokens.append(input_tokens_single_query[start:i +
-                                                             spt_len])
-            start = i + spt_len
-
-        if start < len(input_tokens_single_query):
-            splitted_tokens.append(input_tokens_single_query[start:])
-        return splitted_tokens
-
     def new_request(
         self,
-        input_tokens: torch.Tensor,
-        query_start_loc: torch.Tensor,
+        full_prompts: List[torch.Tensor],
+        indices: List[List[int]],
     ) -> BlendRetrieverTask:
         """Create a new BlendRetrieverTask to retrieve the KV caches.
         It may launch async tasks in the background during the retrieval.
 
-        :param torch.Tensor input_tokens: The input tokens, could include
-            multiple requests in a batch
-        :param torch.Tensor query_start_loc: The start location of the query if
-            input_tokens has multiple requests in a batch. The length should be 
-            the number of requests in the batch + 1.
+        :param List[torch.Tensor] full_prompts: The full prompts for each
+        request in this batch, which will contain the tokens 
+        hitting the vLLM's internal prefix caching.
+        :param List[List[int]] indices: The indices of where the 
+        segmengted requests start in the full prompts.
 
         :return: The retriever task to retrieve the KV caches
         :rtype: BlendRetrieverTask
         """
+        assert len(full_prompts) == len(indices)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            splitted_tokens = []
-            start_loc = query_start_loc[0]
-            for loc in query_start_loc[1:]:
-                logger.debug(f"Request start loc = {start_loc}")
+            splitted_tokens: List[torch.Tensor] = []
+            for prompt_idx, prompt in enumerate(full_prompts):
+                prompt_indices = indices[prompt_idx]
                 splitted_tokens.extend(
-                    self._split_input_tokens(input_tokens[start_loc:loc]))
-                start_loc = loc
-
+                    torch.tensor_split(prompt, prompt_indices))
             logger.debug("Split input tokens into %d requests",
                          len(splitted_tokens))
             tasks = [

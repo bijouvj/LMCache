@@ -61,11 +61,18 @@ perf-test.py
 *.so
 .ycm_extra_conf.py
 
+# temp tests
+lmcache/experimental/tests
+
 # example
 /examples/example_local.yaml
 /examples/openai_chat_completion_client_local.py
+/lmcache/experimental/examples
+/examples/debug
+/examples/p2p/bash.sh
 
 # example output
+*/offline_inference_outputs.jsonl
 /examples/offline_inference/offline_inference_outputs.jsonl
 /examples/save_decode_cache/offline_inference_outputs.jsonl
 /examples/offline_inference/buggy_example.py
@@ -89,3 +96,8 @@ perf-test.py
 /docs/build/
 /docs/build.sh
 /docs/output/
+
+/try
+
+# reference kernels
+/csrc/temp.cu

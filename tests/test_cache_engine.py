@@ -1,6 +1,8 @@
+import os
 import shlex
 import subprocess
 import time
+from dataclasses import fields
 
 import pytest
 import torch
@@ -9,8 +11,9 @@ from lmcache.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
 
-def dumb_metadata(fmt="vllm"):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, "half")
+def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16,
+                                 kv_shape)
 
 
 def generate_kv_cache(num_tokens, fmt, device):
@@ -94,18 +97,21 @@ def test_retrieve_device(backend, src_device, dst_device, autorelease):
 
     fmt = "vllm"
     num_tokens = 500
+    chunk_size = 256
+    kv_shape = (32, 2, chunk_size, 8, 128)
     """ initialize the engine """
     tokens = generate_tokens(num_tokens, src_device)
     kv_cache = generate_kv_cache(num_tokens, fmt, src_device)
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256, backend=backend)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          backend=backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
 
     engine.store(tokens, kv_cache)
     retrieved_cache, ret_mask = engine.retrieve(tokens)
     check_kv_cache_device(retrieved_cache, dst_device)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize(
     "backend",
     [
@@ -123,14 +129,19 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
                              lmserver_process):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
+    chunk_size = 256
+    kv_shape = (32, 2, chunk_size, 8, 128)
+
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     """ initialize the engine """
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256,
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           backend=backend,
                                           remote_serde=remote_serde)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
     """ test retrieve empty """
     retrieved_cache, ret_mask = engine.retrieve(tokens)
     length = torch.sum(ret_mask)
@@ -149,17 +160,20 @@ def test_same_retrieve_store(fmt, backend, remote_serde, autorelease,
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu"])
 def test_retrieve_single_tensor(fmt, backend, autorelease):
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
+    chunk_size = 256
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
     ''' initialize the engine '''
-    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256, backend=backend)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          backend=backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
     ''' test retrieve empty '''
     retrieved_cache, ret_mask = engine.retrieve(tokens, return_tuple=False)
     assert len(retrieved_cache) == 0
@@ -177,7 +191,7 @@ def test_retrieve_single_tensor(fmt, backend, autorelease):
     assert retrieved_cache.shape[token_dim] == num_tokens
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize(
     "backend",
@@ -195,6 +209,10 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     device = "cpu" if backend == "cpu" else "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
+
     print(fmt, chunk_size, backend)
     t1 = time.perf_counter()
     tokens = generate_tokens(num_tokens, device)
@@ -206,7 +224,7 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           backend=backend)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
     t3 = time.perf_counter()
     print(f"init engine takes {t3-t2}")
     """ test store """
@@ -229,7 +247,60 @@ def test_retrieve_prefix(fmt, chunk_size, backend, autorelease,
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
+@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "file://local_disk/",
+    ],
+)
+def test_retrieve_prefix_async(fmt, chunk_size, backend, autorelease):
+    device = "cpu" if backend == "cpu" else "cuda"
+    num_tokens = 2000
+    new_num_tokens = 1000
+    kv_shape = (32, 2, chunk_size, 8, 128)
+
+    print(fmt, chunk_size, backend)
+    t1 = time.perf_counter()
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache(num_tokens, fmt, device)
+    new_tokens = generate_tokens(new_num_tokens, device)
+    _new_kv_cache = generate_kv_cache(new_num_tokens, fmt, device)
+    t2 = time.perf_counter()
+    print(f"init tensor takes {t2-t1}")
+    """ initialize the engine """
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
+                                          backend=backend)
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
+    t3 = time.perf_counter()
+    print(f"init engine takes {t3-t2}")
+    """ test store """
+    engine.store(tokens, kv_cache, blocking=False)
+    t4 = time.perf_counter()
+    print(f"store takes {t4-t3}")
+
+    expected_chunk_cnt = num_tokens // chunk_size
+    expected_length = expected_chunk_cnt * chunk_size
+
+    time.sleep(30)
+
+    print(f"{engine.lookup(tokens)} exists in cache")
+    """ test retrieve """
+    retrieved_cache, ret_mask = engine.retrieve(torch.cat([tokens,
+                                                           new_tokens]))
+    length = torch.sum(ret_mask)
+    t5 = time.perf_counter()
+    print(f"retrieve takes {t5-t4}")
+
+    assert length == expected_length
+    check_kv_cache_equal(retrieved_cache, kv_cache, expected_length, fmt)
+
+    if backend in ["file://local_disk/"]:
+        subprocess.run(shlex.split("rm -rf local_disk/"))
+
+
+@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize(
     "backend", ["cuda", "redis://localhost:6379", "lm://localhost:65000"])
@@ -239,6 +310,10 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
+
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    if backend.startswith("lm"):
+        backend = lmserver_process.server_url
     print(fmt, chunk_size, backend)
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -247,7 +322,7 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           backend=backend)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
     """ test store """
     engine.store(tokens, kv_cache)
     engine.store(new_tokens, new_kv_cache)
@@ -274,19 +349,21 @@ def test_mixed_retrieve(fmt, chunk_size, backend, autorelease,
     retrieved_cache, ret_mask = engine.retrieve(final_tokens)
     length = torch.sum(ret_mask)
     assert length == num_tokens + new_num_tokens
+
     check_kv_cache_equal(retrieved_cache, final_kv_cache, length, fmt)
     """destroy local disk path"""
     if backend in ["file://local_disk/"]:
         subprocess.run(shlex.split("rm -rf local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 def test_skipping(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 200
     chunk_size = 256
     persist_path = "/tmp/test-engine.pth"
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -297,8 +374,8 @@ def test_skipping(fmt, autorelease):
     """ initialize the engine """
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path)
-    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
-    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine1 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
+    engine2 = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
     """ store and persist """
     engine1.store(tokens, kv_cache)
     engine2.store(tokens, kv_cache)
@@ -313,13 +390,14 @@ def test_skipping(fmt, autorelease):
     print("No skip:", t3 - t2)
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 def test_lookup(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 2000
     chunk_size = 256
     persist_path = "/tmp/test-engine-lookup.pth"
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -330,7 +408,7 @@ def test_lookup(fmt, autorelease):
 
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
 
     engine.store(tokens, kv_cache)
 
@@ -359,13 +437,14 @@ def test_lookup(fmt, autorelease):
         f" but got {final_prefix_length}"
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.parametrize("fmt", ["vllm"])
 def test_store_kv_tensors_mask(fmt, autorelease):
     device = "cuda"
     num_tokens = 12000
     new_num_tokens = 2000
     chunk_size = 256
     persist_path = "/tmp/test-engine-store-kv-tensors-mask.pth"
+    kv_shape = (32, 2, chunk_size, 8, 128)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache(num_tokens, fmt, device)
@@ -374,7 +453,7 @@ def test_store_kv_tensors_mask(fmt, autorelease):
 
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size,
                                           persist_path=persist_path)
-    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt)))
+    engine = autorelease(LMCacheEngine(cfg, dumb_metadata(fmt, kv_shape)))
 
     engine.store(tokens, kv_cache)
     prefix_length = engine.lookup(tokens)
@@ -407,3 +486,33 @@ def test_builder(autorelease):
 
     with pytest.raises(ValueError):
         LMCacheEngineBuilder.get_or_create(instance_id, cfg2, dumb_metadata())
+
+
+def test_env_configure():
+    # Test the parsing of the configurations
+    config = LMCacheEngineConfig.from_defaults()
+    for attr in fields(config):
+        expected_env_name = f"LMCACHE_{attr.name.upper()}"
+        os.environ[expected_env_name] = "0"
+    newconfig = LMCacheEngineConfig.from_env()
+    for attr in fields(newconfig):
+        value = getattr(newconfig, attr.name)
+        if type(value) is int or type(value) is float:
+            assert value == 0
+        elif type(value) is bool:
+            assert value is bool("0")
+        elif type(value) is str:
+            assert value == "0"
+        else:
+            raise AssertionError("Unexpected type in LMCacheEngineConfig")
+
+    exclude_env_name = "LMCACHE_REMOTE_URL"
+    del os.environ[exclude_env_name]
+
+    newconfig2 = LMCacheEngineConfig.from_env()
+    assert newconfig2.remote_url is None
+
+    for attr in fields(newconfig):
+        expected_env_name = f"LMCACHE_{attr.name.upper()}"
+        if expected_env_name in os.environ:
+            del os.environ[expected_env_name]

@@ -4,7 +4,8 @@ from typing import List, Optional
 
 from lmcache.logging import init_logger
 from lmcache.protocol import ClientMetaMessage, Constants, ServerMetaMessage
-from lmcache.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.storage_backend.connector.base_connector import \
+    RemoteBytesConnector
 from lmcache.utils import _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -12,7 +13,7 @@ logger = init_logger(__name__)
 
 # TODO: performance optimization for this class, consider using C/C++/Rust
 # for communication + deserialization
-class LMCServerConnector(RemoteConnector):
+class LMCServerConnector(RemoteBytesConnector):
 
     def __init__(self, host, port):
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -20,13 +21,18 @@ class LMCServerConnector(RemoteConnector):
         self.socket_lock = threading.Lock()
 
     def receive_all(self, n):
-        data = bytearray()
-        while len(data) < n:
-            packet = self.client_socket.recv(n - len(data))
-            if not packet:
+        received = 0
+        buffer = bytearray(n)
+        view = memoryview(buffer)
+
+        while received < n:
+            num_bytes = self.client_socket.recv_into(view[received:],
+                                                     n - received)
+            if num_bytes == 0:
                 return None
-            data.extend(packet)
-        return data
+            received += num_bytes
+
+        return buffer
 
     def send_all(self, data):
         """
@@ -43,7 +49,7 @@ class LMCServerConnector(RemoteConnector):
         return (ServerMetaMessage.deserialize(response).code ==
                 Constants.SERVER_SUCCESS)
 
-    def set(self, key: str, obj: bytes):
+    def set(self, key: str, obj: bytes):  # type: ignore[override]
         logger.debug("Call to set()!")
         self.send_all(
             ClientMetaMessage(Constants.CLIENT_PUT, key, len(obj)).serialize())
@@ -64,7 +70,7 @@ class LMCServerConnector(RemoteConnector):
             return None
         length = meta.length
         data = self.receive_all(length)
-        return data
+        return data if data is None else bytes(data)
 
     def list(self) -> List[str]:
         self.send_all(

@@ -1,14 +1,16 @@
-lmcache.storage\_backend package
+LMCache Storage Backend
 ================================
 
 Subpackages
 -----------
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
    lmcache.storage_backend.connector
    lmcache.storage_backend.serde
+   lmcache.storage_backend.evictor
+   lmcache.storage_backend.mem_pool
 
 Submodules
 ----------

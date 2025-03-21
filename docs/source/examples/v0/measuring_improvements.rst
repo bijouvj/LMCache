@@ -1,6 +1,6 @@
 .. _measuring_improvements:
 
-Measuring improvements
+End-to-end measurements
 =======================
 
 We provide a suite of end-to-end testing examples to demonstrate the performance improvements of using 
@@ -69,7 +69,7 @@ comparing the improvements of using LMCache.
 
 An snapshot of results from ``test_lmcache_local_cpu.pdf`` is shown below:
 
-.. figure:: figures/test_1.png
+.. figure:: ../figures/test_1.png
     :width: 70%
     :align: center
     :alt: LMCache

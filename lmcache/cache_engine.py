@@ -7,7 +7,9 @@ import torch
 
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.storage_backend import CreateStorageBackend
+from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, KVCache, _lmcache_nvtx_annotate
 
 logger = init_logger(__name__)
@@ -21,9 +23,8 @@ class LMCacheEngine:
         metadata: LMCacheEngineMetadata,
     ):
         """
-        Throws:
-            RuntimeError if the loaded configuration does not match the current
-            configuration
+        raises: RuntimeError if the loaded configuration does not 
+            match the current configuration
         """
 
         self.config = config
@@ -31,8 +32,15 @@ class LMCacheEngine:
         self.chunk_size = config.chunk_size
         self.save_decode_cache = config.save_decode_cache
 
+        self.miss_tokens_count = 0
+        self.hit_tokens_count = 0
+        self.hit_rate = 0.0
+
         self.engine_ = CreateStorageBackend(config, metadata)
         logger.debug(f"Current storage backend type {type(self.engine_)}")
+
+        InitializeUsageContext(config, metadata)
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     def _make_key(self, chunk_hash: str, fmt: str) -> CacheEngineKey:
         return CacheEngineKey(
@@ -72,12 +80,11 @@ class LMCacheEngine:
         """
         Chunk the tokens into chunks of size self.chunk_size.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        :param tokens: the input tokens, with shape [seq_len]
             device: the target device after chunking
 
-        Output:
-            a generator of chunks of tokens, each with shape [chunk_size]
+        :return: a generator of chunks of tokens, each with 
+                shape [chunk_size]
         """
         # TODO(Jiayi): the following step can be parallelized
         for i in range(0, len(tokens), self.chunk_size):
@@ -99,9 +106,8 @@ class LMCacheEngine:
         self,
         kv_tensors: KVCache,
     ) -> torch.Tensor:
-        """
-        Convert the nested tuple of kv tensors to a single big tensor with 2
-        extra dimensions
+        """ Convert the nested tuple of kv tensors to a single 
+        big tensor with 2 extra dimensions
         """
         k_temp = []
         v_temp = []
@@ -168,15 +174,14 @@ class LMCacheEngine:
         """
         Chunk the kv cache into chunks of size self.chunk_size.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
-            kv_tensors: the kv cache of the tokens, in the format of nested 
-            tuples
-            fmt: either 'huggingface' or 'vllm'
+        
+        :param tokens: the input tokens, with shape [seq_len]
+        :param kv_tensors: the kv cache of the tokens, in the format 
+            of nested tuples
+        :param fmt: either 'huggingface' or 'vllm'
 
-        Output:
-            a generator of tuples, each tuple is a chunk of tokens and the 
-            corresponding kv cache.
+        :return: a generator of tuples, each tuple is a chunk of tokens
+                and the corresponding kv cache.
         """
         return self._slice_kv_at(0, kv_tensors, fmt)
 
@@ -233,7 +238,7 @@ class LMCacheEngine:
             )
 
     @_lmcache_nvtx_annotate
-    @torch.no_grad()
+    @torch.inference_mode()
     def store(
         self,
         tokens: torch.Tensor,
@@ -244,33 +249,39 @@ class LMCacheEngine:
     ) -> None:
         """
         Store the KV cache of the tokens into the cache engine.
-
-        Input:
-            tokens: the input tokens, with shape [seq_len]
-            kv_tensors_raw: the kv cache of the tokens, in the format of nested 
-            tuples. The number of tokens in the kv_tensors_raw should be the 
-            same as trues in kv_tensors_mask if mask is not None.
-            Otherwise, it should be the same as the input tokens.
-            kv_tensors_mask: a boolean mask of tokens indicating which tokens'
-            KV Cache should be stored. Only support suffix mask.
-            None is taken as trues for all tokens.
-            len(kv_tensors_mask) should be the same as len(tokens)
-            number of true should be the same as kv_tensors_raw token number
-            
-            format: either 'huggingface' or 'vllm'
-                For huggingface, it should have the shape of 
+        Format: either 'huggingface' or 'vllm' 
+                
+                For huggingface, 
+                it should have the shape of 
                 [num_heads, num_tokens, head_size]
 
-                For vllm, it should have the shape of 
+                For vllm,
+                it should have the shape of 
                 [num_tokens, num_heads, head_size]
 
-        Returns:
-            None
+        :param tokens: the input tokens, with shape [seq_len]
+        :param kv_tensors_raw: the kv cache of the tokens, in 
+            the format of nested tuples. The number of tokens 
+            in the kv_tensors_raw should be the same as trues in 
+            kv_tensors_mask if mask is not None. Otherwise, 
+            it should be the same as the input tokens.
+        :param kv_tensors_mask: a boolean mask of tokens indicating 
+            which tokens' KV Cache should be stored. Only support 
+            suffix mask. None is taken as trues for all tokens.
+            len(kv_tensors_mask) should be the same as len(tokens)
+            number of true should be the same as kv_tensors_raw token 
+            number.
+
+        :param skip_existing: whether to skip the existing chunks
+        :param blocking: whether to wait for the store operation to finish
+        :return: None
 
         Note:
             The KV cache should NOT have the "batch" dimension.
         """
         start_time = time.perf_counter()
+        monitor_req_id = self.stats_monitor.on_store_request(
+            self._num_tokens_in_kv(kv_tensors_raw, self.metadata.fmt))
         fmt = self.metadata.fmt
         if kv_tensors_mask is None:
             kv_tensors_mask = torch.ones_like(tokens, dtype=torch.bool)
@@ -311,11 +322,12 @@ class LMCacheEngine:
         logger.info(f"Stored/updated {n_chunks} chunks, total time "
                     f"{end_time - start_time:.2f}s, make chunks time "
                     f"{end_make_chunks - start_time:.2f}s")
+        self.stats_monitor.on_store_finished(monitor_req_id)
 
     # prefix caching only needs a mask_len
     # but non-prefix might need an roi
     @_lmcache_nvtx_annotate
-    @torch.no_grad()
+    @torch.inference_mode()
     def retrieve(
         self,
         tokens: torch.Tensor,
@@ -326,26 +338,25 @@ class LMCacheEngine:
         Retrieve the KV cache of the tokens from the cache engine. The 
         retrieved KV cache should be a prefix of the input tokens.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        The KV cache of the tokens, in the format of nested 
+        tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
+        num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
+        hidden_dim] (vllm).
 
-            mask: a boolean mask of tokens indicating which tokens'
+        Will be an empty tuple if no kv cache is retrieved (no matter 
+        return_tuple is True or not).
+
+        :param tokens: the input tokens, with shape [seq_len]
+
+        :param mask: a boolean mask of tokens indicating which tokens'
             KV Cache should be retrieved. Currently, only support
             suffix mask.
 
-            return_tuple: whether to return the kv cache as a tuple or a 
+        :param return_tuple: whether to return the kv cache as a tuple or a 
             single tensor
 
-        Output: 
-            kv_tensors: the kv cache of the tokens, in the format of nested 
-            tuples or a single tensor with shape [num_layers, 2, hidden_dim, 
-            num_tokens] (huggingface) or [num_layers, 2, num_tokens, 
-            hidden_dim] (vllm).
-            Will be an empty tuple if no kv cache is retrieved (no matter 
-            return_tuple is True or not).
-
-
-            ret_mask: indicate which tokens are retrieved
+        :return: Tuple[ kv_tensors , ret_mask] indicate which tokens 
+            are retrieved
         """
         num_skip_chunk = 0
         num_skip_tok = 0
@@ -354,6 +365,9 @@ class LMCacheEngine:
             num_skip_tok = (len(mask) - torch.sum(mask))
             num_skip_chunk = num_skip_tok // self.chunk_size
         ret_mask[:num_skip_tok] = False
+
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            len(tokens) - num_skip_tok)
 
         st = time.perf_counter()
         fmt = self.metadata.fmt
@@ -380,7 +394,9 @@ class LMCacheEngine:
 
         if len(retrieved_kv_chunks) == 0:
             logging.info("Retrieved 0 chunks")
+            self.miss_tokens_count += tokens.shape[0]
             ret_mask[:] = False
+            self.stats_monitor.on_retrieve_finished(monitor_req_id, 0)
             return (), ret_mask
 
         # drop extra tokens in the first chunk
@@ -405,12 +421,20 @@ class LMCacheEngine:
                                                                          2]
 
         ed = time.perf_counter()
+        self.hit_tokens_count += retrieved_token_count
+        self.miss_tokens_count += (len(tokens) - num_skip_tok -
+                                   retrieved_token_count)
+        self.hit_rate = self.hit_tokens_count / (self.miss_tokens_count +
+                                                 self.hit_tokens_count)
         logger.info(f"Retrieved {len(retrieved_kv_chunks)} chunks "
                     f"({retrieved_token_count} tokens in total) --"
+                    f"hit rate {self.hit_rate:.2%} -- "
                     f"elapsed time {ed - st}")
 
         ret_mask[num_skip_tok + retrieved_token_count:] = False
 
+        self.stats_monitor.on_retrieve_finished(monitor_req_id,
+                                                retrieved_token_count)
         return ret, ret_mask
 
     @_lmcache_nvtx_annotate
@@ -422,11 +446,9 @@ class LMCacheEngine:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
 
-        Input:
-            tokens: the input tokens, with shape [seq_len]
+        :param tokens: the input tokens, with shape [seq_len]
 
-        Output:
-            An int indicating how many prefix tokens are cached.
+        :return: An int indicating how many prefix tokens are cached.
         """
         # NOTE(Sixian): Now this is a prefix lookup.
         fmt = self.metadata.fmt
@@ -448,6 +470,7 @@ class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
     _metadatas: Dict[str, LMCacheEngineMetadata] = {}
+    _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
     @classmethod
     def get_or_create(
@@ -460,15 +483,17 @@ class LMCacheEngineBuilder:
         Builds a new LMCacheEngine instance if it doesn't already exist for the
         given ID.
 
-        Raises:
-            ValueError if the instance already exists with a different
+        raises: ValueError if the instance already exists with a different
             configuration.
         """
         if instance_id not in cls._instances:
             engine = LMCacheEngine(config, metadata)
+            # TODO(ApostaC): Remove the hard-coded log interval here
+            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
+            cls._stat_loggers[instance_id] = stat_logger
             return engine
         else:
             if (cls._cfgs[instance_id] != config
@@ -491,6 +516,9 @@ class LMCacheEngineBuilder:
         if instance_id in cls._instances:
             engine = cls._instances[instance_id]
             engine.close()
+            stat_logger = cls._stat_loggers[instance_id]
+            stat_logger.shutdown()
             cls._instances.pop(instance_id, None)
             cls._cfgs.pop(instance_id, None)
             cls._metadatas.pop(instance_id, None)
+            cls._stat_loggers.pop(instance_id, None)

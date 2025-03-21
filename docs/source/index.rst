@@ -9,11 +9,18 @@
 Welcome to LMCache!
 =====================
 
-.. figure:: https://people.cs.uchicago.edu/~junchenj/docs/lmcache-logo.png
+.. figure:: ./assets/lmcache-logo_crop.png
   :width: 60%
   :align: center
   :alt: LMCache
   :class: no-scaled-link
+
+.. raw:: html
+
+   <p style="text-align:center; font-size:24px;">
+   <strong> Redis for LLMs. </strong>
+   </p>
+
 
 .. raw:: html
 
@@ -35,26 +42,42 @@ Welcome to LMCache!
 
 :raw-html:`<br />`
 
-Documentation
+What's next?
 =====================
 
+Follow these links to get started with LMCache:
+
+* :ref:`speedup` 
+* :ref:`installation`
+* :ref:`docker`
+
+:raw-html:`<br />`
+
+Documentation
+=====================
 
 .. toctree::
    :maxdepth: 1
    :caption: Getting Started
 
-   getting_started/installation
-   getting_started/quickstart
+   getting_started/speedup
+   getting_started/installation   
    getting_started/docker
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Examples
+   :maxdepth: 2
+   :caption: Configure LMCache
 
-   examples/launching
-   examples/backend
-   examples/measuring_improvements
+   configuration/v1/index
+   configuration/v0/index
 
+.. toctree::
+   :maxdepth: 2
+   :caption: Detailed Examples
+
+   examples/v1/index
+   examples/v0/index
+   
 .. toctree::
    :maxdepth: 1
    :caption: Models
@@ -63,23 +86,19 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Configuration
-
-   configuration/config
-
-.. toctree::
-   :maxdepth: 1
    :caption: Developer Documentation
 
    developer_tutorial/overview
    developer_tutorial/LLM_Engine
-
    developer_tutorial/LMCache_Engine
-   
    developer_tutorial/LMCache_Backend
 
 .. toctree::
    :maxdepth: 1
    :caption: Advanced
 
-   advanced/lmcache
+   advanced/lmcache.blend
+   advanced/lmcache.server
+   advanced/lmcache.storage_backend
+   advanced/lmcache.experimental
+   advanced/lmcache.integration
