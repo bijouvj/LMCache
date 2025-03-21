@@ -14,7 +14,6 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-
 class KvikIOBackend(LMCBackendInterface):
     """
     LMCache backend that uses NVIDIA GDS cuFile via the kvikio library for
@@ -42,6 +41,9 @@ class KvikIOBackend(LMCBackendInterface):
         # Extract cache directory from config
         if config.kvikio_cache_dir is None:
             raise ValueError("kvikio_cache_dir must be specified in the config")
+
+        #kvikio.defaults.set("num_threads", 8)
+        os.environ["KVIKIO_NTHREADS"] = "8"
 
         self.cache_dir = Path(config.kvikio_cache_dir)
         self.device = torch.device(dst_device)
