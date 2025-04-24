@@ -70,13 +70,16 @@ class LMCacheEngineConfig:
             blend_recompute_ratio: float = 0.15,
             blend_min_tokens: int = 256,
             blend_separator: str = blend_default_separator,
-            blend_add_special_in_precomp: bool = False
+            blend_add_special_in_precomp: bool = False,
+            kvikio_cache_dir: Optional[str] = "/mnt/nvme",
+            kvikio_buffer_size: Optional[int] = 1024*1024
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(
             chunk_size, local_device, max_local_cache_size, remote_url,
             remote_serde, pipelined_backend, save_decode_cache,
             enable_blending, blend_recompute_ratio, blend_min_tokens,
-            blend_separator, blend_add_special_in_precomp)
+            blend_separator, blend_add_special_in_precomp,
+            kvikio_cache_dir, kvikio_buffer_size)
 
     @staticmethod
     def from_legacy(
