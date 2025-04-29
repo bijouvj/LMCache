@@ -44,14 +44,15 @@ class KvikIOBackend(LMCBackendInterface):
 
         #kvikio.defaults.set("num_threads", 8)
         os.environ["KVIKIO_NTHREADS"] = "8"
+        os.environ["KVIKIO_COMPAT_MODE"] = "OFF"
 
         self.cache_dir = Path(config.kvikio_cache_dir)
         self.device = torch.device(dst_device)
         self.buffer_size = config.kvikio_buffer_size
 
         # Store metadata for tensor shape/dtype
-        self.kv_shape = (32, 2, 256, 8, 128)
-        self.kv_dtype = torch.bfloat16
+        self.kv_shape = metadata.kv_shape
+        self.kv_dtype = metadata.kv_dtype
 
         # Create a lock-protected hash map for IO futures
         self.io_lock = threading.Lock()
@@ -119,21 +120,20 @@ class KvikIOBackend(LMCBackendInterface):
             bytes_written = self.io_map.get(key.chunk_hash)
 
         if bytes_written is None:
+            logger.warning(f"Tensor with key {key.chunk_hash} not found in cache")
             return None
 
         # file should exist by now
         cache_path = self._get_cache_path(key)
 
         # Create an empty tensor with the specified shape and dtype
-        tensor = torch.empty(self.kv_shape, dtype=torch.float32, device=self.device)
+        tensor = torch.empty(self.kv_shape, dtype=self.kv_dtype, device=self.device)
 
         # Use kvikio to read the tensor from disk
         with kvikio.CuFile(str(cache_path), "r") as f:
             future = f.pread(tensor)
             bytes_read = future.get()
 
-        # all tensors are float32 in the cache
-        tensor = tensor.to(self.kv_dtype)
         return tensor
 
     def batched_get(
@@ -166,9 +166,6 @@ class KvikIOBackend(LMCBackendInterface):
         """
         try:
             cache_path = self._get_cache_path(key)
-
-            if kv_chunk.dtype != torch.float32:
-                kv_chunk = kv_chunk.to(torch.float32)
 
             # Ensure tensor is on GPU
             if not kv_chunk.is_cuda:
