@@ -2,8 +2,6 @@ import asyncio
 import ctypes
 from typing import List, Optional, Union, no_type_check
 
-import infinistore
-
 from lmcache.experimental.memory_management import (MemoryAllocatorInterface,
                                                     MemoryObj)
 # reuse
@@ -27,18 +25,19 @@ class InfinistoreConnector(RemoteConnector):
     def __init__(self, host: str, port: int, dev_name,
                  loop: asyncio.AbstractEventLoop,
                  memory_allocator: MemoryAllocatorInterface):
-        config = infinistore.ClientConfig(
-            host_addr=host,
-            service_port=port,
-            log_level="info",
-            connection_type=infinistore.TYPE_RDMA,
-            ib_port=1,
-            link_type=infinistore.LINK_ETHERNET,
-            dev_name=dev_name,
-        )
+        #config = infinistore.ClientConfig(
+        #    host_addr=host,
+        #    service_port=port,
+        #    log_level="info",
+        #    connection_type=infinistore.TYPE_RDMA,
+        #    ib_port=1,
+        #    link_type=infinistore.LINK_ETHERNET,
+        #    dev_name=dev_name,
+        #)
 
-        self.rdma_conn = infinistore.InfinityConnection(config)
-
+        #self.rdma_conn = infinistore.InfinityConnection(config)
+        self.rdma_conn = None
+                   
         self.memory_allocator = memory_allocator
         self.loop = loop
         self.rdma_conn.connect()
@@ -46,7 +45,7 @@ class InfinistoreConnector(RemoteConnector):
         # allocate 4KB buffer for RDMA read
         self.buffer_size = 4 << 10
         self.buffer = bytearray(self.buffer_size)
-        self.rdma_conn.register_mr(_get_ptr(self.buffer), self.buffer_size)
+        #self.rdma_conn.register_mr(_get_ptr(self.buffer), self.buffer_size)
 
     async def exists(self, key: CacheEngineKey) -> bool:
 
@@ -61,7 +60,8 @@ class InfinistoreConnector(RemoteConnector):
         try:
             await self.rdma_conn.read_cache_single_async(
                 key_str + "metadata", _get_ptr(self.buffer), len(self.buffer))
-        except infinistore.lib.InfiniStoreKeyNotFound:
+        #except infinistore.lib.InfiniStoreKeyNotFound:
+        except:
             return None
 
         metadata = RedisMetadata.deserialize(self.buffer[:METADATA_BYTES_LEN])
@@ -91,7 +91,8 @@ class InfinistoreConnector(RemoteConnector):
         try:
             await self.rdma_conn.read_cache_single_async(
                 key_str + "kv_bytes", ptr, size)
-        except infinistore.lib.InfiniStoreKeyNotFound:
+        #except infinistore.lib.InfiniStoreKeyNotFound:
+        except:
             return None
 
         view = memoryview(memory_obj.byte_array)
